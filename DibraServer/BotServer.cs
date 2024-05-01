@@ -2,10 +2,9 @@
 {
     public static class BotServer
     {
-        public static void print(string mens)
+        public static void Print(string mens)
         {
-            Console.WriteLine("[DreamNav BotServer] " + mens);    
+            Console.WriteLine($"[DreamNav BotServer] {mens}");    
         }
-
     }
 }

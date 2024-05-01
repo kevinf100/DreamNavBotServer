@@ -1,31 +1,89 @@
-using System;
-using System.Diagnostics;
-using System.Diagnostics.Metrics;
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using DibraServer;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
 using Newtonsoft.Json;
-using System.Runtime;
-using System.Text.Json.Nodes;
 using Newtonsoft.Json.Linq;
-using Microsoft.AspNetCore.Mvc;
-using System.Threading.Channels;
-using System.Net.Sockets;
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-BotServer.print("Made by discord: VivoDibra#1182");
-BotServer.print("Starting...");
+BotServer.Print("Made by discord: VivoDibra#1182");
+BotServer.Print("Changes by: Kevinf100");
+BotServer.Print("Starting...");
 var wsOptions = new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(120) };
 app.UseWebSockets(wsOptions);
 
-var socketMananger = new SocketMananger();
+var socketManager = new SocketManager();
+
+async Task SendPing(ConcurrentDictionary<WebSocket, object?> channel)
+{
+    JObject jsonObj = new()
+    {
+        { "name", "Console" },
+        { "type", "ping" }
+    };
+    List<Task> tasks = new();
+    foreach (var socket in channel.Keys)
+    {
+        try
+        {
+            tasks.Add(socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(jsonObj))), WebSocketMessageType.Text, true, CancellationToken.None));
+        }
+        catch (Exception e)
+        {
+            socket.Abort();
+            BotServer.Print($"An error has happened while trying to ping.\n{e}");
+        }
+    }
+    await Task.WhenAll(tasks);
+}
+
+async Task SendPingAll()
+{
+    List<Task> tasks = new();
+    foreach (var channel in socketManager.connections.Values)
+    {
+        tasks.Add(SendPing(channel));
+    }
+    await Task.WhenAll(tasks);
+}
+
+
+async Task CancelSocket(WebSocket socket)
+{
+    try
+    {
+        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server is shutting down!", CancellationToken.None);
+    }
+    catch (Exception)
+    { /* We are stopping anyway, who cares if we fail at something.*/ }
+}
+
+async Task SendPingLoop()
+{
+    var tasks = new List<Task>();
+    while (!socketManager.ServerLoop.IsCancellationRequested)
+    {
+        tasks.Add(Task.Delay(1000));
+        tasks.Add(SendPingAll());
+        await Task.WhenAll(tasks);
+        tasks.Clear();
+    }
+    BotServer.Print("Shutting down server.");
+    foreach (KeyValuePair<string, ConcurrentDictionary<WebSocket, object?>> entry in socketManager.connections)
+    {
+        BotServer.Print($"Shutting down channel {entry.Key}");
+        foreach (var socket in entry.Value.Keys)
+        {
+            tasks.Add(CancelSocket(socket));
+        }
+        await Task.WhenAll(tasks);
+    }
+}
+
 
 app.Use(async (HttpContext context, Func<Task> next) =>
 {
@@ -33,10 +91,8 @@ app.Use(async (HttpContext context, Func<Task> next) =>
     {
         if (context.WebSockets.IsWebSocketRequest)
         {
-            using (WebSocket webSocket = await context.WebSockets.AcceptWebSocketAsync())
-            {
-                await SendToAll(webSocket);
-            }
+            using WebSocket webSocket = await context.WebSockets.AcceptWebSocketAsync();
+            await SendToAll(webSocket);
         }
         else
         {
@@ -58,6 +114,8 @@ async Task SendToAll(WebSocket webSocket)
     WebSocketReceiveResult result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
     string name = "";
     string channel = "";
+    bool init = false;
+    int fails = 0;
 
     while (!result.CloseStatus.HasValue)
     {
@@ -69,38 +127,32 @@ async Task SendToAll(WebSocket webSocket)
             if (myObject != null)
             {
                 //Initialize
-                if (myObject.type == "init")
+                if (!init && myObject.type == "init")
                 {
                     name = myObject.name;
                     channel = myObject.channel;
-                    socketMananger.addSocket(webSocket, channel);
-                    BotServer.print(name + " has connected to channel: " + channel);
+                    socketManager.AddSocket(webSocket, channel);
+                    BotServer.Print($"{name} has connected to channel: {channel}");
                 }
                 //Already initialized
                 else if (name != "")
                 {
-                    // Its a ping, ping just that connection
-                    if (string.Equals(myObject.type, "ping"))
-                    {
-                        JObject pingMens = new JObject
-                        {
-                            { "_keepAlive_", "" }
-                        };
-
-                        await webSocket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(pingMens))), result.MessageType, result.EndOfMessage, CancellationToken.None);
-
-                    }
+                    // Its a ping, ignore it.
+                    if (myObject.type == "ping"){ }
                     //Broadcast message to all connections in the channel.
                     else
                     {
-                        JObject jsonObj = JsonConvert.DeserializeObject<JObject>(message);
-                        jsonObj.Add("name", name);
-                        var tasks = new List<Task>();
-                        foreach (var socket in socketMananger.getChannelConnections(channel))
+                        JObject? jsonObj = JsonConvert.DeserializeObject<JObject>(message);
+                        if (jsonObj != null)
                         {
-                            tasks.Add(socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(jsonObj))), result.MessageType, result.EndOfMessage, CancellationToken.None));
+                            jsonObj.Add("name", name);
+                            var tasks = new List<Task>();
+                            foreach (var socket in socketManager.GetChannelConnections(channel))
+                            {
+                                tasks.Add(socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(jsonObj))), result.MessageType, result.EndOfMessage, CancellationToken.None));
+                            }
+                            await Task.WhenAll(tasks);
                         }
-                        await Task.WhenAll(tasks);
                     }
                 }
             }
@@ -108,18 +160,49 @@ async Task SendToAll(WebSocket webSocket)
             result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
 
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            //silence...
+            BotServer.Print("An Exception has happen exception:");
+            BotServer.Print(e.ToString());
+            BotServer.Print("Result:");
+            BotServer.Print(result.ToString() ?? "Null for some reason.");
+            fails++;
+            if (fails == 3)
+            {
+                result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+            }
+            else if (fails >= 5)
+            {
+                BotServer.Print($"To many Exception. Dropping {name}");
+                break;
+            }
         }
     }
 
-    BotServer.print(name + " has desconnected.");
-    socketMananger.removeSocket(webSocket, channel);
-    await webSocket.CloseAsync(result.CloseStatus.Value, result.CloseStatusDescription, CancellationToken.None);
+    BotServer.Print($"{name} has disconnected.");
+    socketManager.RemoveSocket(webSocket, channel);
+    await webSocket.CloseAsync(result.CloseStatus != null ? result.CloseStatus.Value : WebSocketCloseStatus.InvalidMessageType, result.CloseStatusDescription, CancellationToken.None);
 
 }
 
-BotServer.print("Bot Server is running!");
 
-app.Run();
+// Catch OS Kill Signal.
+PosixSignalRegistration.Create(PosixSignal.SIGTERM, (context) =>
+{
+    socketManager.StopServer();
+});
+// Catch OS Kill Signal.
+PosixSignalRegistration.Create(PosixSignal.SIGQUIT, (context) =>
+{
+    socketManager.StopServer();
+});
+// Catch Ctrl + C
+Console.CancelKeyPress += (sender, eventArgs) =>
+{
+    socketManager.StopServer();
+};
+
+BotServer.Print("Bot Server is running!");
+
+app.Start();
+await SendPingLoop();
