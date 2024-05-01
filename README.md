@@ -9,6 +9,10 @@ You no Longer need to ping from the client, the server will ping for you.
 
 This now supports Linux, feel free to try it. I tested and confirm it works in WSL.
 
+Download: https://github.com/kevinf100/DreamNavBotServer/releases
+
+Note I made way more changes on my own version I use. This is a quick edit to give the public a slightly better version.
+
 ```lua
 --[REQUIRED] Change BotServer URL
 BotServer.url = "ws://127.0.0.1:5000/send"
