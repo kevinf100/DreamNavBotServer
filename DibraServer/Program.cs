@@ -51,17 +51,6 @@ async Task SendPingAll()
     await Task.WhenAll(tasks);
 }
 
-
-async Task CancelSocket(WebSocket socket)
-{
-    try
-    {
-        await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Server is shutting down!", CancellationToken.None);
-    }
-    catch (Exception)
-    { /* We are stopping anyway, who cares if we fail at something.*/ }
-}
-
 async Task SendPingLoop()
 {
     var tasks = new List<Task>();
@@ -73,15 +62,6 @@ async Task SendPingLoop()
         tasks.Clear();
     }
     BotServer.Print("Shutting down server.");
-    foreach (KeyValuePair<string, ConcurrentDictionary<WebSocket, object?>> entry in socketManager.connections)
-    {
-        BotServer.Print($"Shutting down channel {entry.Key}");
-        foreach (var socket in entry.Value.Keys)
-        {
-            tasks.Add(CancelSocket(socket));
-        }
-        await Task.WhenAll(tasks);
-    }
 }
 
 
@@ -206,3 +186,4 @@ BotServer.Print("Bot Server is running!");
 
 app.Start();
 await SendPingLoop();
+await app.StopAsync();
